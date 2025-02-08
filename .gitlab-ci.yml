@@ -1,0 +1,284 @@
+
+
+stages:          
+  - install_tools
+  - parallel_tasks
+  - build
+  - quality-gate-check
+  - securitychecks_image
+  - push
+  - terraform_init
+  - terraform_plan
+  - terraform_apply
+  - ecs_deploy
+
+variables:
+  TF_STATE_BUCKET: "gitlab-ecsrunner101"
+  TF_STATE_KEY: "ecs/terraform.tfstate"
+  TF_VAR_project_name: ${CI_PROJECT_NAME}
+  TF_VAR_container_tag: ${CI_COMMIT_SHA}                                 
+  MAVEN_OPTS: "-Dmaven.repo.local=.m2/repository" 
+
+# Global timeout
+default:
+  timeout: 1h  # Global timeout for all jobs
+
+# Global cache for Maven dependencies
+.maven-cache: &maven-cache
+  cache:
+    key: maven-${CI_COMMIT_REF_SLUG}-${CI_JOB_NAME}-v1
+    paths:
+      - .m2/repository/
+    policy: pull-push
+
+# Build outputs cache
+.build-cache: &build-cache
+  cache:
+    key: build-${CI_COMMIT_REF_SLUG}-${CI_JOB_NAME}-v1
+    paths:
+      - target/
+    policy: pull-push
+
+
+.aws-oidc: &aws-oidc
+  image:
+    name: amazon/aws-cli:latest
+    entrypoint: [""]
+  id_tokens:
+    MY_OIDC_TOKEN:
+      aud: https://gitlab.com
+  before_script:
+    - mkdir -p ~/.aws
+    - echo "${MY_OIDC_TOKEN}" > /tmp/web_identity_token
+    - echo -e "[profile oidc]\nrole_arn=${ROLE_ARN}\nweb_identity_token_file=/tmp/web_identity_token" > ~/.aws/config
+    - export AWS_PROFILE=oidc
+    - aws sts get-caller-identity
+
+install_tools_mvn_trivy_kubectl_docker:       
+  stage: install_tools
+  script:
+    - sudo apt-get update
+    - sudo apt install -y openjdk-17-jre-headless
+    - sudo apt install -y maven
+    - sudo apt-get install wget apt-transport-https gnupg lsb-release -y
+    - wget -qO - https://aquasecurity.github.io/trivy-repo/deb/public.key | sudo apt-key add -
+    - echo deb https://aquasecurity.github.io/trivy-repo/deb $(lsb_release -sc) main | sudo tee -a /etc/apt/sources.list.d/trivy.list
+    - sudo apt-get update
+    - sudo apt-get install -y trivy
+    - sudo snap install kubectl --classic
+    - sudo apt-get update && sudo apt-get install -y gnupg software-properties-common
+    - wget -O- https://apt.releases.hashicorp.com/gpg | gpg --dearmor | sudo tee /usr/share/keyrings/hashicorp-archive-keyring.gpg > /dev/null
+    - echo "deb [signed-by=/usr/share/keyrings/hashicorp-archive-keyring.gpg] https://apt.releases.hashicorp.com $(lsb_release -cs) main" | sudo tee /etc/apt/sources.list.d/hashicorp.list
+    - sudo apt update
+    - sudo apt-get install -y terraform
+    - sudo snap install aws-cli --classic
+    - wget https://binaries.sonarsource.com/Distribution/sonar-scanner-cli/sonar-scanner-cli-6.2.1.4610-linux-x64.zip
+
+  tags:
+   - self-runner
+
+unit_test:
+  <<: *maven-cache       # Only needs Maven dependencies
+  stage: parallel_tasks
+  needs:
+    - install_tools_mvn_trivy_kubectl_docker
+  script:
+    - mvn test
+  tags:
+   - self-runner
+
+security_checks_fs:       
+  stage: parallel_tasks
+  needs:
+    - install_tools_mvn_trivy_kubectl_docker
+  script:
+    - trivy fs -f json -o fs-security-report.json . 
+    - trivy fs -f table -o fs-security-report.txt . 
+  artifacts:
+    paths:
+      - fs-security-report.json
+      - fs-security-report.txt 
+    expire_in: 1 week  
+  rules:
+    - when: on_success
+  tags:
+   - self-runner
+
+build_image:
+  <<: 
+    - *maven-cache      # Needs both Maven dependencies
+    - *build-cache      # and build outputs
+  stage: build
+  timeout: 30m  # Specific timeout for build job
+  variables:
+    VERSION: ${CI_COMMIT_SHA}
+  script:
+    - echo "$DOCKER_PASSWORD" | docker login -u "$DOCKER_USER" --password-stdin
+    - mvn package  -DskipTests
+    - docker pull toluid/mvngit:latest || true  
+    - docker build --cache-from toluid/mvngit:latest -t toluid/mvngit:latest -t toluid/mvngit:${VERSION} .
+  dependencies:
+    - unit_test
+  tags:
+   - self-runner
+
+sonarqube-check:
+  stage: quality-gate-check
+  needs:
+    - build_image
+  image: 
+    name: sonarsource/sonar-scanner-cli:11
+  variables:
+    SONAR_USER_HOME: "${CI_PROJECT_DIR}/.sonar"  
+    GIT_DEPTH: "0"  
+  cache:
+    policy: pull-push
+    key: "sonar-cache-$CI_COMMIT_REF_SLUG"
+    paths:
+      - "${SONAR_USER_HOME}/cache"
+      - sonar-scanner/
+  script: 
+    - sonar-scanner -Dsonar.host.url="${SONAR_HOST_URL}"
+  allow_failure: true
+  only:
+    - main
+
+security_checks_image:       
+  stage: securitychecks_image
+  script:
+    - trivy image -f json -o image-security-report.json toluid/mvngit:latest
+    - trivy image -f table -o image-security-report.txt toluid/mvngit:latest
+  artifacts:
+    paths:
+      - image-security-report.json
+      - image-security-report.txt
+    expire_in: 1 week
+  dependencies:
+    - build_image  
+  artifacts:
+    reports:
+      container_scanning: image-security-report.json
+  rules:
+    - when: on_success
+  tags:
+   - self-runner
+
+
+push_image:       
+  stage: push
+  variables:
+    VERSION: ${CI_COMMIT_SHA}
+  script:
+    - echo "$DOCKER_PASSWORD" | docker login -u "$DOCKER_USER" --password-stdin
+    - docker push toluid/mvngit:latest 
+    - docker push toluid/mvngit:${VERSION}  
+  tags:
+   - self-runner
+ 
+
+terraform_init:
+  <<: *aws-oidc
+  stage: terraform_init
+  script:
+    - aws sts get-caller-identity 
+    # Initialize Terraform with backend configuration
+    - cd terraform/
+    - terraform init
+      -backend-config="bucket=${TF_STATE_BUCKET}"
+      -backend-config="key=${TF_STATE_KEY}"
+      -backend-config="region=${AWS_DEFAULT_REGION}"
+      -backend-config="encrypt=true"
+      -backend-config="dynamodb_table=terraform-state-lockgit"
+  tags:
+    - self-runner
+
+terraform_plan:
+  <<: *aws-oidc
+  stage: terraform_plan
+  script:
+    # Initialize with backend configuration
+    - cd terraform/
+    - terraform init
+      -backend-config="bucket=${TF_STATE_BUCKET}"
+      -backend-config="key=${TF_STATE_KEY}"
+      -backend-config="region=${AWS_DEFAULT_REGION}"
+      -backend-config="encrypt=true"
+      -backend-config="dynamodb_table=terraform-state-lockgit"
+    # Create plan
+    - terraform plan -out=tfplan
+  artifacts:
+    paths:
+      - terraform/tfplan
+    expire_in: 1 week
+  dependencies:
+    - terraform_init
+  tags:
+    - self-runner
+
+terraform_apply:
+  <<: *aws-oidc
+  stage: terraform_apply
+  
+  script:
+    # Initialize with backend configuration
+    - cd terraform/
+    - terraform init
+      -backend-config="bucket=${TF_STATE_BUCKET}"
+      -backend-config="key=${TF_STATE_KEY}"
+      -backend-config="region=${AWS_DEFAULT_REGION}"
+      -backend-config="encrypt=true"
+      -backend-config="dynamodb_table=terraform-state-lockgit"
+    # Apply the plan
+    - terraform apply -auto-approve tfplan
+  dependencies:
+    - terraform_plan
+  only:
+    - main
+  tags:
+    - self-runner
+
+ecs_deploy:
+  <<: *aws-oidc
+  stage: ecs_deploy
+  retry:
+    max: 2
+    when:
+      - runner_system_failure
+      - api_failure
+      - stuck_or_timeout_failure
+  script:
+    - echo "Starting deployment checks..."
+    - aws ecs describe-services --cluster app-cluster --services app-first-service || exit 1
+    - echo "Triggering deployment..."
+    - aws ecs update-service --cluster app-cluster --service app-first-service --force-new-deployment
+    - echo "Deployment triggered successfully"
+  only:
+    - main
+  tags:
+    - self-runner
+
+
+cleanup:terraform_destroy:
+  <<: *aws-oidc
+  stage: .post    # This is a special stage that runs after all other stages
+  script:
+    - cd terraform/
+    - terraform init
+      -backend-config="bucket=${TF_STATE_BUCKET}"
+      -backend-config="key=${TF_STATE_KEY}"
+      -backend-config="region=${AWS_DEFAULT_REGION}"
+      -backend-config="encrypt=true"
+      -backend-config="dynamodb_table=terraform-state-lockgit"
+    - terraform plan -destroy -out=tfdestroyplan
+    - terraform apply -auto-approve tfdestroyplan
+  rules:
+    - if: $CI_COMMIT_BRANCH == "main"
+      when: manual
+  environment:
+    name: production
+    action: stop
+  allow_failure: false
+  timeout: 1 hour
+  retry: 0
+  tags:
+    - self-runner
