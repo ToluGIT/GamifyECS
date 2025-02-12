@@ -1,7 +1,7 @@
 resource "aws_security_group" "alb" {
   name        = "${var.project_name}-alb-sg"
   description = "ALB security group"
-  vpc_id      = aws_default_vpc.main.id
+  vpc_id      = aws_vpc.main.id
 
   ingress {
     from_port   = var.container_port
@@ -23,7 +23,7 @@ resource "aws_security_group" "alb" {
 resource "aws_security_group" "ecs" {
   name        = "${var.project_name}-ecs-sg"
   description = "ECS service security group"
-  vpc_id      = aws_default_vpc.main.id
+  vpc_id      = aws_vpc.main.id
 
   ingress {
     from_port       = 0
@@ -45,7 +45,7 @@ resource "aws_security_group" "ecs" {
 resource "aws_security_group" "rds" {
   name        = "${var.project_name}-rds-sg"
   description = "Security group for RDS"
-  vpc_id      = aws_default_vpc.main.id
+  vpc_id      = aws_vpc.main.id
 
   ingress {
     from_port       = 3306

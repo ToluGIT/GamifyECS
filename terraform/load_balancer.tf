@@ -1,7 +1,7 @@
 resource "aws_lb" "main" {
   name               = "app-first-albname" 
   load_balancer_type = "application"
-  subnets            = [aws_default_subnet.az_a.id, aws_default_subnet.az_b.id]
+  subnets            = [aws_subnet.public_subnets["us-east-1a"].id, aws_subnet.public_subnets["us-east-1b"].id]  # Using public subnets for ALB
   security_groups    = [aws_security_group.alb.id]
   tags               = local.common_tags
 }
@@ -11,7 +11,7 @@ resource "aws_lb_target_group" "main" {
   port        = var.container_port
   protocol    = "HTTP"
   target_type = "ip"
-  vpc_id      = aws_default_vpc.main.id
+  vpc_id      = aws_vpc.main.id 
 
   health_check {
     path                = "/"

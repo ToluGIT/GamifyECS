@@ -52,18 +52,6 @@ variable "db_name" {
   default     = "unitgame"
 }
 
-variable "db_username" {
-  description = "Database administrator username"
-  type        = string
-  sensitive   = true
-}
-
-variable "db_password" {
-  description = "Database administrator password"
-  type        = string
-  sensitive   = true
-}
-
 variable "admin_username" {
   description = "Admin username for the application"
   type        = string
@@ -80,4 +68,32 @@ variable "passwddata" {
   description = "Optional password for the RDS instance. If not provided, a random password will be generated."
   type        = string
   default     = null
+}
+
+variable "vpc_cidr_block" {
+  default = "10.0.0.0/16"
+}
+
+variable "private_subnets" {
+  type = map(number)
+  default = {
+    "us-east-1a" = 1
+    "us-east-1b" = 2
+  }
+}
+
+variable "public_subnets" {
+  type = map(number)
+  default = {
+    "us-east-1a" = 3
+    "us-east-1b" = 4
+  }
+}
+
+variable "isolated_subnets" {
+  type = map(number)
+  default = {
+    "us-east-1a" = 5
+    "us-east-1b" = 6
+  }
 }

@@ -69,9 +69,9 @@ resource "aws_ecs_service" "main" {
   launch_type     = "FARGATE"
 
   network_configuration {
-    subnets          = [aws_default_subnet.az_a.id, aws_default_subnet.az_b.id]
-    security_groups  = [aws_security_group.ecs.id]
-    assign_public_ip = true
+    subnets         = [for subnet in aws_subnet.private_subnets : subnet.id]
+    security_groups = [aws_security_group.ecs.id]
+    assign_public_ip = false
   }
 
   load_balancer {
